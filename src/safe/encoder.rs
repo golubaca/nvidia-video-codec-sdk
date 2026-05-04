@@ -48,8 +48,10 @@ use crate::sys::nvEncodeAPI::{
 #[derive(Debug)]
 pub struct Encoder {
     pub(crate) ptr: *mut c_void,
-    // Used to fetch the device pointer for an externally allocated buffer
-    pub(crate) ctx: Arc<CudaContext>,
+    /// CUDA context, present only when the encoder was initialized via
+    /// [`Encoder::initialize_with_cuda`]. `None` for encoders created
+    /// from a Direct3D 11 device — those don't need a CUDA context.
+    pub(crate) ctx: Option<Arc<CudaContext>>,
 }
 
 /// The client must flush the encoder before freeing any resources.
@@ -111,13 +113,64 @@ impl Encoder {
 
         Ok(Self {
             ptr: encoder,
-            ctx: cuda_ctx,
+            ctx: Some(cuda_ctx),
+        })
+    }
+
+    /// Create an [`Encoder`] with a Direct3D 11 device as the encode
+    /// device.
+    ///
+    /// `d3d11_device` is the raw `ID3D11Device` COM interface pointer.
+    /// NVENC takes its own reference internally, so the caller may
+    /// release their reference once `initialize_with_d3d11` returns
+    /// successfully — but the device itself must remain valid for the
+    /// lifetime of the returned [`Encoder`].
+    ///
+    /// See [NVIDIA docs](https://docs.nvidia.com/video-technologies/video-codec-sdk/12.0/nvenc-video-encoder-api-prog-guide/index.html#directx).
+    ///
+    /// # Errors
+    ///
+    /// Could error if there was no encode-capable device detected or if
+    /// the supplied device was not valid.
+    ///
+    /// # Safety
+    ///
+    /// `d3d11_device` must be a non-null pointer to a live
+    /// `ID3D11Device`. Passing a null or dangling pointer is undefined
+    /// behavior. Behavior is also undefined if the device's underlying
+    /// resources are released before the returned [`Encoder`] is
+    /// dropped.
+    pub unsafe fn initialize_with_d3d11(
+        d3d11_device: *mut c_void,
+    ) -> Result<Self, EncodeError> {
+        let mut encoder = ptr::null_mut();
+        let mut session_params = NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS {
+            version: NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER,
+            deviceType: NV_ENC_DEVICE_TYPE::NV_ENC_DEVICE_TYPE_DIRECTX,
+            apiVersion: NVENCAPI_VERSION,
+            device: d3d11_device,
+            ..Default::default()
+        };
+
+        if let err @ Err(_) =
+            unsafe { (ENCODE_API.open_encode_session_ex)(&mut session_params, &mut encoder) }
+                .result_without_string()
+        {
+            // We are required to destroy the encoder if there was an error.
+            unsafe { (ENCODE_API.destroy_encoder)(encoder) }.result_without_string()?;
+            err?;
+        }
+
+        Ok(Self {
+            ptr: encoder,
+            ctx: None,
         })
     }
 
     // TODO:
     // - Make Encoder generic in Device.
-    // - Add functions to create Encoder from other encode devices.
+    // - Add functions to create Encoder from other encode devices
+    //   (e.g. OpenGL, Vulkan).
 
     /// Get the encode GUIDs which the encoder supports.
     ///

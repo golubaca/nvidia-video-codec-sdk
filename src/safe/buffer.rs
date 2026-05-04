@@ -198,7 +198,17 @@ impl Session {
         pitch: u32,
         mapped_buffer: MappedBuffer,
     ) -> Result<RegisteredResource<'_, MappedBuffer>, EncodeError> {
-        let stream = self.encoder.ctx.default_stream();
+        // `register_cuda_resource` is only meaningful for CUDA-backed
+        // encoders. Calling it on an encoder created via
+        // `Encoder::initialize_with_d3d11` is a programming error — use
+        // `register_generic_resource` with
+        // `NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX` instead.
+        let cuda_ctx = self
+            .encoder
+            .ctx
+            .as_ref()
+            .expect("register_cuda_resource called on a non-CUDA Encoder");
+        let stream = cuda_ctx.default_stream();
         let (device_ptr, _) = mapped_buffer.device_ptr(&stream);
         self.register_generic_resource(
             mapped_buffer,
