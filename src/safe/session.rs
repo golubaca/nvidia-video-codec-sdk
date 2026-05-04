@@ -194,6 +194,7 @@ impl Session {
             inputTimeStamp: params.input_timestamp,
             codecPicParams: params.codec_params.map(Into::into).unwrap_or_default(),
             pictureType: params.picture_type,
+            encodePicFlags: params.encode_pic_flags,
             ..Default::default()
         };
         unsafe { (ENCODE_API.encode_picture)(self.encoder.ptr, &mut encode_pic_params) }
@@ -239,6 +240,11 @@ pub struct EncodePictureParams {
     pub picture_type: NV_ENC_PIC_TYPE,
     /// Codec-specific parameters
     pub codec_params: Option<CodecPictureParams>,
+    /// Bit-mask of [`NV_ENC_PIC_FLAGS`] for the current frame. Use
+    /// [`NV_ENC_PIC_FLAGS::NV_ENC_PIC_FLAG_FORCEIDR`] to inject an
+    /// IDR on demand (loss-recovery path); leave at `0` for the
+    /// driver-driven GOP cadence.
+    pub encode_pic_flags: u32,
 }
 
 impl Default for EncodePictureParams {
@@ -247,6 +253,7 @@ impl Default for EncodePictureParams {
             input_timestamp: 0,
             picture_type: NV_ENC_PIC_TYPE::NV_ENC_PIC_TYPE_UNKNOWN,
             codec_params: None,
+            encode_pic_flags: 0,
         }
     }
 }
