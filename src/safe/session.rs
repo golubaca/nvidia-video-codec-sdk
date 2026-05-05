@@ -218,6 +218,45 @@ impl Session {
         unsafe { (ENCODE_API.encode_picture)(self.encoder.ptr, &mut encode_pic_params) }
             .result(&self.encoder)
     }
+
+    /// Tell the encoder that a previously-encoded frame should no longer
+    /// be used as a reference for future frames. The next encoded frame
+    /// will reference an earlier (still-valid) frame in the DPB and the
+    /// encoder produces a small recovery P-frame instead of forcing a
+    /// full IDR — the basis of NVENC's reference-picture-invalidation
+    /// (RFI) loss-recovery path.
+    ///
+    /// The `invalid_ref_frame_timestamp` argument is the same value that
+    /// was passed as [`EncodePictureParams::input_timestamp`] when the
+    /// frame in question was originally submitted via
+    /// [`Session::encode_picture`]. Callers typically retain a small
+    /// frame-index → timestamp window (the DPB is short — usually 16
+    /// frames) and look up the timestamp for each frame the receiver
+    /// reports as lost.
+    ///
+    /// To invalidate a contiguous range of frames, call this once per
+    /// frame timestamp.
+    ///
+    /// See the [NVIDIA docs] for the underlying
+    /// `NvEncInvalidateRefFrames` semantics.
+    ///
+    /// [NVIDIA docs]: https://docs.nvidia.com/video-technologies/video-codec-sdk/nvenc-application-note/index.html#reference-picture-invalidation
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the frame is no longer in the encoder's
+    /// reference picture buffer (DPB) or if the encoder rejects the
+    /// request for any other reason. In either case the typical
+    /// fallback is to force an IDR on the next encoded frame.
+    pub fn invalidate_ref_frames(
+        &self,
+        invalid_ref_frame_timestamp: u64,
+    ) -> Result<(), EncodeError> {
+        unsafe {
+            (ENCODE_API.invalidate_ref_frames)(self.encoder.ptr, invalid_ref_frame_timestamp)
+        }
+        .result(&self.encoder)
+    }
 }
 
 /// Send an EOS notifications on drop to flush the encoder.
