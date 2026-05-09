@@ -5,7 +5,9 @@
 //! frames. The [`Session`] also stores some information such as the encode
 //! width and height so that you do not have to keep repeating it each time.
 
+use std::ffi::c_void;
 use std::fmt::Debug;
+use std::ptr;
 
 use super::{api::ENCODE_API, encoder::Encoder, result::EncodeError};
 use crate::{
@@ -16,6 +18,8 @@ use crate::{
         NV_ENC_CODEC_H264_GUID,
         NV_ENC_CODEC_HEVC_GUID,
         NV_ENC_CODEC_PIC_PARAMS,
+        NV_ENC_EVENT_PARAMS,
+        NV_ENC_EVENT_PARAMS_VER,
         NV_ENC_PIC_PARAMS,
         NV_ENC_PIC_PARAMS_AV1,
         NV_ENC_PIC_PARAMS_H264,
@@ -40,6 +44,12 @@ pub struct Session {
     pub(crate) height: u32,
     pub(crate) buffer_format: NV_ENC_BUFFER_FORMAT,
     pub(crate) encode_guid: GUID,
+    /// Set when the session was created with
+    /// [`EncoderInitParams::enable_encode_async`]. Stamped on every
+    /// `encode_picture`'s `pic_params.completionEvent`; unregistered
+    /// on drop *before* the encoder's `destroy_encoder` runs (so
+    /// the unregister sees a live encoder).
+    pub(crate) async_event: Option<*mut c_void>,
 }
 
 impl Session {
@@ -195,6 +205,11 @@ impl Session {
             codecPicParams: params.codec_params.map(Into::into).unwrap_or_default(),
             pictureType: params.picture_type,
             encodePicFlags: params.encode_pic_flags,
+            // Stamp the async-mode event handle (or null in sync
+            // mode). When non-null, NVENC signals the event when
+            // this frame's bitstream is ready and the caller should
+            // wait on it before `Bitstream::try_lock`-ing the output.
+            completionEvent: self.async_event.unwrap_or(ptr::null_mut()),
             ..Default::default()
         };
         unsafe { (ENCODE_API.encode_picture)(self.encoder.ptr, &mut encode_pic_params) }
@@ -259,12 +274,36 @@ impl Session {
     }
 }
 
-/// Send an EOS notifications on drop to flush the encoder.
+/// Send an EOS notifications on drop to flush the encoder, and
+/// unregister the async-event handle (if any) before the encoder
+/// itself is destroyed by the `Drop for Encoder` chain.
 impl Drop for Session {
     fn drop(&mut self) {
         if !std::thread::panicking() {
             self.end_of_stream()
                 .expect("The encoder should not be busy.");
+        }
+        // Unregister the async event AFTER end_of_stream and
+        // BEFORE destroy_encoder (the encoder field's Drop). NVENC
+        // requires async events to be unregistered while the
+        // encoder is still alive (`destroy_encoder` will fail
+        // otherwise per the SDK programming guide). Errors are
+        // logged-and-continued on shutdown — there's nothing the
+        // caller can do, and the kernel object cleanup is the
+        // user's responsibility (`CloseHandle`).
+        if let Some(handle) = self.async_event.take() {
+            let mut event_params = NV_ENC_EVENT_PARAMS {
+                version: NV_ENC_EVENT_PARAMS_VER,
+                completionEvent: handle,
+                ..Default::default()
+            };
+            // SAFETY: encoder ptr is live (its Drop runs after
+            // ours); event_params is fully populated; the handle
+            // was paired with this encoder by `start_session`.
+            let _ = unsafe {
+                (ENCODE_API.unregister_async_event)(self.encoder.ptr, &mut event_params)
+            }
+            .result_without_string();
         }
     }
 }

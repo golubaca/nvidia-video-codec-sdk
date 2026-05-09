@@ -503,16 +503,37 @@ impl Encoder {
         buffer_format: NV_ENC_BUFFER_FORMAT,
         mut initialize_params: EncoderInitParams<'_>,
     ) -> Result<Session, EncodeError> {
-        let initialize_params = &mut initialize_params.param;
-        let width = initialize_params.encodeWidth;
-        let height = initialize_params.encodeHeight;
-        unsafe { (ENCODE_API.initialize_encoder)(self.ptr, initialize_params) }.result(&self)?;
+        let async_event = initialize_params.async_event;
+        let init_param_ref = &mut initialize_params.param;
+        let width = init_param_ref.encodeWidth;
+        let height = init_param_ref.encodeHeight;
+        let encode_guid = init_param_ref.encodeGUID;
+        unsafe { (ENCODE_API.initialize_encoder)(self.ptr, init_param_ref) }.result(&self)?;
+
+        // Register the async event AFTER initialize_encoder, per
+        // NVENC's documented init order. If registration fails the
+        // encoder is still alive — destroy it via the Drop chain by
+        // returning the error (the partially-initialized Encoder
+        // drops, calling destroy_encoder).
+        if let Some(handle) = async_event {
+            let mut event_params = crate::sys::nvEncodeAPI::NV_ENC_EVENT_PARAMS {
+                version: crate::sys::nvEncodeAPI::NV_ENC_EVENT_PARAMS_VER,
+                completionEvent: handle,
+                ..Default::default()
+            };
+            // SAFETY: encoder ptr is live (initialize_encoder just
+            // succeeded); event_params is fully populated.
+            unsafe { (ENCODE_API.register_async_event)(self.ptr, &mut event_params) }
+                .result(&self)?;
+        }
+
         Ok(Session {
             encoder: self,
             width,
             height,
             buffer_format,
-            encode_guid: initialize_params.encodeGUID,
+            encode_guid,
+            async_event,
         })
     }
 }
@@ -523,6 +544,14 @@ impl Encoder {
 pub struct EncoderInitParams<'a> {
     param: NV_ENC_INITIALIZE_PARAMS,
     marker: std::marker::PhantomData<&'a mut NV_ENC_CONFIG>,
+    /// Caller-supplied Windows event handle (or platform-equivalent)
+    /// for asynchronous-encode mode. When set, [`Encoder::start_session`]
+    /// registers it via `nvEncRegisterAsyncEvent` after
+    /// `nvEncInitializeEncoder` succeeds, [`Session::encode_picture`]
+    /// stamps it on each frame's `pic_params.completionEvent`, and
+    /// [`Session::drop`] unregisters it before the encoder is
+    /// destroyed. `None` keeps the legacy synchronous flow.
+    async_event: Option<*mut c_void>,
 }
 
 impl<'a> EncoderInitParams<'a> {
@@ -540,7 +569,41 @@ impl<'a> EncoderInitParams<'a> {
         Self {
             param,
             marker: std::marker::PhantomData,
+            async_event: None,
         }
+    }
+
+    /// Enable NVENC asynchronous-encode mode. The caller supplies a
+    /// Windows event handle (`HANDLE`, opaque `*mut c_void`); NVENC
+    /// signals the event when each encoded frame's bitstream is
+    /// ready for [`Bitstream::try_lock`] to read non-blocking.
+    /// The session takes ownership of the registration lifecycle:
+    /// [`Encoder::start_session`] registers the handle once
+    /// `nvEncInitializeEncoder` succeeds, and [`Session::drop`]
+    /// unregisters it before the encoder destruction runs. Combined
+    /// with `Bitstream::try_lock` (which sets `doNotWait = 1`), this
+    /// matches the pattern Sunshine uses on Windows
+    /// (`src/nvenc/nvenc_base.cpp` ~ lines 218 / 414-421 / 559).
+    ///
+    /// Calling this method on a non-Windows host is meaningful only
+    /// where the runtime exposes an equivalent `HANDLE`-shaped
+    /// signaling primitive — on Linux, NVENC's async mode is
+    /// generally unsupported and callers should keep the legacy
+    /// synchronous path.
+    ///
+    /// # Safety
+    ///
+    /// `event_handle` must be a valid event handle (created via
+    /// `CreateEventW` on Windows) that lives at least as long as
+    /// the resulting [`Session`]. Closing the handle while the
+    /// session is alive is undefined behavior. Passing a null
+    /// pointer or an unrelated handle yields the same UB; check
+    /// `NV_ENC_CAPS_ASYNC_ENCODE_SUPPORT` on the encoder before
+    /// calling this method.
+    pub unsafe fn enable_encode_async(&mut self, event_handle: *mut c_void) -> &mut Self {
+        self.param.enableEncodeAsync = 1;
+        self.async_event = Some(event_handle);
+        self
     }
 
     /// Specifies the preset for encoding. If the preset GUID is set then
