@@ -230,6 +230,14 @@ impl Session {
     /// should retry after a few milliseconds.
     pub fn end_of_stream(&self) -> Result<(), EncodeError> {
         let mut encode_pic_params = NV_ENC_PIC_PARAMS::end_of_stream();
+        // Stamp the async-mode event handle on the EOS frame too —
+        // when `enable_encode_async` was used, NVENC requires the
+        // event on EVERY `encode_picture` call (including EOS). The
+        // regular `encode_picture` path stamps it; without the same
+        // stamp here NVENC returns InvalidParam ("Completion event
+        // is NULL") and `Drop for Session`'s expect panics on
+        // session shutdown.
+        encode_pic_params.completionEvent = self.async_event.unwrap_or(ptr::null_mut());
         unsafe { (ENCODE_API.encode_picture)(self.encoder.ptr, &mut encode_pic_params) }
             .result(&self.encoder)
     }
