@@ -9,9 +9,15 @@ use std::ffi::c_void;
 use std::fmt::Debug;
 use std::ptr;
 
-use super::{api::ENCODE_API, encoder::Encoder, result::EncodeError};
+use super::{
+    api::ENCODE_API,
+    encoder::{Encoder, EncoderInitParams},
+    result::EncodeError,
+};
 use crate::{
     sys::nvEncodeAPI::{
+        NV_ENC_RECONFIGURE_PARAMS,
+        NV_ENC_RECONFIGURE_PARAMS_VER,
         GUID,
         NV_ENC_BUFFER_FORMAT,
         NV_ENC_CODEC_AV1_GUID,
@@ -279,6 +285,35 @@ impl Session {
             (ENCODE_API.invalidate_ref_frames)(self.encoder.ptr, invalid_ref_frame_timestamp)
         }
         .result(&self.encoder)
+    }
+
+    /// Change the session's parameters in place (`NvEncReconfigureEncoder`)
+    /// — rate control, for one — without tearing the session down.
+    ///
+    /// `params` must describe the session as it was started, changed
+    /// only where NVENC allows; the rest of the reconfigure rules are
+    /// the [NVIDIA docs]'. With `force_idr` false the stream simply
+    /// continues at the new settings, no keyframe.
+    ///
+    /// [NVIDIA docs]: https://docs.nvidia.com/video-technologies/video-codec-sdk/nvenc-video-encoder-api-prog-guide/index.html#changing-encoder-settings
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if NVENC rejects the new parameters; the session
+    /// keeps its old ones.
+    pub fn reconfigure(
+        &self,
+        params: &mut EncoderInitParams<'_>,
+        force_idr: bool,
+    ) -> Result<(), EncodeError> {
+        let mut reconfigure = NV_ENC_RECONFIGURE_PARAMS {
+            version: NV_ENC_RECONFIGURE_PARAMS_VER,
+            reInitEncodeParams: params.param,
+            ..Default::default()
+        };
+        reconfigure.set_forceIDR(u32::from(force_idr));
+        unsafe { (ENCODE_API.reconfigure_encoder)(self.encoder.ptr, &mut reconfigure) }
+            .result(&self.encoder)
     }
 }
 

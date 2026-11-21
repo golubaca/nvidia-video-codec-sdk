@@ -542,7 +542,7 @@ impl Encoder {
 /// initialize parameter.
 #[derive(Debug)]
 pub struct EncoderInitParams<'a> {
-    param: NV_ENC_INITIALIZE_PARAMS,
+    pub(crate) param: NV_ENC_INITIALIZE_PARAMS,
     marker: std::marker::PhantomData<&'a mut NV_ENC_CONFIG>,
     /// Caller-supplied Windows event handle (or platform-equivalent)
     /// for asynchronous-encode mode. When set, [`Encoder::start_session`]
